@@ -28,6 +28,10 @@ With this advanced level of simulation, the possibilities are endless. You can:
 
 **And the best part? You can achieve all of this without needing a real robot on hand.**
 
+## 3D drivetrain mode
+
+Maple-Sim now ships with an ode4j-powered 3D chassis pipeline in addition to the existing dyn4j 2D world. Simply switch your drivetrain implementation to an `AbstractDriveTrainSimulation3D` subclass such as `SwerveDriveSimulation3D`, and the simulator will automatically boot the 3D world, complete with gravity and infinitely tall field obstacles. The arena enforces that only one physics dimension runs at a time, so all existing 2D scenarios remain unchanged until you opt into the 3D drivetrain classes.
+
 ## Getting Started
 
 Getting started with one of our [template projects](https://shenzhen-robotics-alliance.github.io/maple-sim/#getting-started-with-templates).

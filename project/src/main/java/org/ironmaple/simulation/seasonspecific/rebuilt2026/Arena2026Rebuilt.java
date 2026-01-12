@@ -103,15 +103,19 @@ public class Arena2026Rebuilt extends SimulatedArena {
 
             // Colliders to describe the hub plus ramps
             if (AddRampCollider) {
-                super.addRectangularObstacle(
+
+                super.addDoubleRamp(
                         Inches.of(47).in(Meters),
                         Inches.of(217).in(Meters),
+                        Inches.of(6.513).in(Meters),
                         new Pose2d(RebuiltHub.blueHubPose.toTranslation2d(), new Rotation2d()));
 
-                super.addRectangularObstacle(
+                super.addDoubleRamp(
                         Inches.of(47).in(Meters),
                         Inches.of(217).in(Meters),
+                        Inches.of(6.513).in(Meters),
                         new Pose2d(RebuiltHub.redHubPose.toTranslation2d(), new Rotation2d()));
+
             }
 
             // Colliders to describe just the hub

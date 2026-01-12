@@ -4,6 +4,7 @@ import static edu.wpi.first.units.Units.Seconds;
 
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.networktables.BooleanPublisher;
 import edu.wpi.first.networktables.BooleanSubscriber;
@@ -25,11 +26,15 @@ import org.dyn4j.geometry.Geometry;
 import org.dyn4j.geometry.MassType;
 import org.dyn4j.world.PhysicsWorld;
 import org.dyn4j.world.World;
+import org.ironmaple.simulation.debug.PhysicsWorldVisualizer;
 import org.ironmaple.simulation.drivesims.AbstractDriveTrainSimulation;
+import org.ironmaple.simulation.drivesims.AbstractDriveTrainSimulation3D;
+import org.ironmaple.simulation.drivesims.DriveTrainSimulation;
 import org.ironmaple.simulation.gamepieces.GamePiece;
 import org.ironmaple.simulation.gamepieces.GamePieceOnFieldSimulation;
 import org.ironmaple.simulation.gamepieces.GamePieceProjectile;
 import org.ironmaple.simulation.motorsims.SimulatedBattery;
+import org.ironmaple.simulation.physics3d.OdePhysicsWorld3D;
 import org.ironmaple.simulation.seasonspecific.rebuilt2026.Arena2026Rebuilt;
 import org.ironmaple.utils.mathutils.GeometryConvertor;
 
@@ -211,12 +216,53 @@ public abstract class SimulatedArena {
     }
 
     protected final World<Body> physicsWorld;
-    protected final Set<AbstractDriveTrainSimulation> driveTrainSimulations;
+    private final FieldMap fieldMap;
+    protected final Set<AbstractDriveTrainSimulation> driveTrainSimulations2d;
+    private final Set<AbstractDriveTrainSimulation3D> driveTrainSimulations3D;
+    private OdePhysicsWorld3D odePhysicsWorld;
+    private PhysicsDimension activeDimension = PhysicsDimension.UNSPECIFIED;
 
     protected final Set<GamePiece> gamePieces;
     protected final List<Simulatable> customSimulations;
 
     private final List<IntakeSimulation> intakeSimulations;
+
+    private enum PhysicsDimension {
+        UNSPECIFIED,
+        TWO_D,
+        THREE_D
+    }
+
+    private void ensureDimension(PhysicsDimension requested) {
+        ensureDimension(requested, null);
+    }
+
+    private void ensureDimension(PhysicsDimension requested, String context) {
+        if (requested == PhysicsDimension.UNSPECIFIED) return;
+        if (activeDimension == PhysicsDimension.UNSPECIFIED) {
+            activeDimension = requested;
+            return;
+        }
+        if (activeDimension == requested) {
+            return;
+        }
+        final String reason = context == null ? "This feature" : context;
+        throw new IllegalStateException(reason
+                + " cannot be used while the "
+                + (activeDimension == PhysicsDimension.THREE_D ? "3D" : "2D")
+                + " physics engine is active.");
+    }
+
+    private boolean isThreeDimensional() {
+        return activeDimension == PhysicsDimension.THREE_D;
+    }
+
+    private void ensureOdeWorld() {
+        if (odePhysicsWorld == null) {
+            odePhysicsWorld = new OdePhysicsWorld3D(
+                    fieldMap.getObstacleExtrusions(), fieldMap.getRampExtrusions(), fieldMap.getDoubleRampExtrusions());
+        }
+    }
 
     /**
      *
@@ -230,10 +276,12 @@ public abstract class SimulatedArena {
      * @param obstaclesMap the season-specific field map containing the layout of obstacles for the simulation
      */
     protected SimulatedArena(FieldMap obstaclesMap) {
+        this.fieldMap = obstaclesMap;
         this.physicsWorld = new World<>();
         this.physicsWorld.setGravity(PhysicsWorld.ZERO_GRAVITY);
         for (Body obstacle : obstaclesMap.obstacles) this.physicsWorld.addBody(obstacle);
-        this.driveTrainSimulations = new HashSet<>();
+        this.driveTrainSimulations2d = new HashSet<>();
+        this.driveTrainSimulations3D = new HashSet<>();
         customSimulations = new ArrayList<>();
         this.gamePieces = new HashSet<>();
         this.intakeSimulations = new ArrayList<>();
@@ -241,6 +289,7 @@ public abstract class SimulatedArena {
         setupValueForMatchBreakdown("TeleopScore");
         setupValueForMatchBreakdown("Auto/AutoScore");
         resetFieldPublisher.set(false);
+        PhysicsWorldVisualizer.publishFieldMap(obstaclesMap);
     }
 
     /**
@@ -295,6 +344,7 @@ public abstract class SimulatedArena {
      * @param intakeSimulation the intake simulation to be registered
      */
     protected synchronized void addIntakeSimulation(IntakeSimulation intakeSimulation) {
+        ensureDimension(PhysicsDimension.TWO_D, "Intake simulations require the 2D physics engine.");
         this.intakeSimulations.add(intakeSimulation);
         this.physicsWorld.addContactListener(intakeSimulation.getGamePieceContactListener());
     }
@@ -313,9 +363,23 @@ public abstract class SimulatedArena {
      * @param driveTrainSimulation the drivetrain simulation to be registered
      */
     public synchronized void addDriveTrainSimulation(AbstractDriveTrainSimulation driveTrainSimulation) {
-        this.physicsWorld.addBody(driveTrainSimulation);
+        addDriveTrainSimulation((DriveTrainSimulation) driveTrainSimulation);
+    }
 
-        this.driveTrainSimulations.add(driveTrainSimulation);
+    public synchronized void addDriveTrainSimulation(DriveTrainSimulation driveTrainSimulation) {
+        if (driveTrainSimulation instanceof AbstractDriveTrainSimulation driveTrainSimulation2d) {
+            ensureDimension(PhysicsDimension.TWO_D);
+            this.physicsWorld.addBody(driveTrainSimulation2d);
+            this.driveTrainSimulations2d.add(driveTrainSimulation2d);
+        } else if (driveTrainSimulation instanceof AbstractDriveTrainSimulation3D driveTrainSimulation3d) {
+            ensureDimension(PhysicsDimension.THREE_D);
+            ensureOdeWorld();
+            driveTrainSimulation3d.bindToWorld(odePhysicsWorld);
+            this.driveTrainSimulations3D.add(driveTrainSimulation3d);
+        } else {
+            throw new IllegalArgumentException("Unsupported drivetrain simulation type: "
+                    + driveTrainSimulation.getClass().getName());
+        }
     }
 
     /**
@@ -331,6 +395,7 @@ public abstract class SimulatedArena {
      * @param gamePiece the game piece to be registered in the simulation
      */
     public synchronized void addGamePiece(GamePieceOnFieldSimulation gamePiece) {
+        ensureDimension(PhysicsDimension.TWO_D, "Ground game pieces");
         this.physicsWorld.addBody(gamePiece);
         this.gamePieces.add(gamePiece);
     }
@@ -460,6 +525,7 @@ public abstract class SimulatedArena {
      * @param gamePieceProjectile the projectile to be registered and launched in the simulation
      */
     public synchronized void addGamePieceProjectile(GamePieceProjectile gamePieceProjectile) {
+        ensureDimension(PhysicsDimension.TWO_D, "Projectile game pieces");
         this.gamePieces.add(gamePieceProjectile);
         gamePieceProjectile.launch();
     }
@@ -475,6 +541,7 @@ public abstract class SimulatedArena {
      * @return <code>true</code> if this set contained the specified element
      */
     public synchronized boolean removeGamePiece(GamePieceOnFieldSimulation gamePiece) {
+        ensureDimension(PhysicsDimension.TWO_D, "Ground game pieces");
         this.physicsWorld.removeBody(gamePiece);
         return this.gamePieces.remove(gamePiece);
     }
@@ -497,6 +564,7 @@ public abstract class SimulatedArena {
      * @return <code>true</code> if this set contained the specified element
      */
     public synchronized boolean removeProjectile(GamePieceProjectile gamePieceLaunched) {
+        ensureDimension(PhysicsDimension.TWO_D, "Projectile game pieces");
         return this.gamePieces.remove(gamePieceLaunched);
     }
 
@@ -508,6 +576,7 @@ public abstract class SimulatedArena {
      * <p>This method clears all game pieces from the physics world and the simulation's game piece collection.
      */
     public synchronized void clearGamePieces() {
+        ensureDimension(PhysicsDimension.TWO_D, "Game piece clearing");
         for (GamePieceOnFieldSimulation gamePiece : this.gamePiecesOnField()) this.physicsWorld.removeBody(gamePiece);
 
         this.gamePieces.clear();
@@ -523,6 +592,13 @@ public abstract class SimulatedArena {
      */
     public synchronized void shutDown() {
         this.physicsWorld.removeAllBodies();
+        this.driveTrainSimulations2d.clear();
+        if (odePhysicsWorld != null) {
+            odePhysicsWorld.dispose();
+            odePhysicsWorld = null;
+        }
+        this.driveTrainSimulations3D.clear();
+        activeDimension = PhysicsDimension.UNSPECIFIED;
     }
 
     /**
@@ -549,7 +625,8 @@ public abstract class SimulatedArena {
 
             matchClock += getSimulationDt().in(Units.Seconds);
 
-            SmartDashboard.putNumber("MapleArenaSimulation/Dyn4jEngineCPUTimeMS", (System.nanoTime() - t0) / 1000000.0);
+            SmartDashboard.putNumber(
+                    "MapleArenaSimulation/PhysicsEngineCPUTimeMS", (System.nanoTime() - t0) / 1000000.0);
 
             if (resetFieldSubscriber.get()) {
                 SimulatedArena.getInstance().resetFieldForAuto();
@@ -577,13 +654,18 @@ public abstract class SimulatedArena {
      */
     protected void simulationSubTick(int subTickNum) {
         SimulatedBattery.simulationSubTick();
-        driveTrainSimulations.forEach(AbstractDriveTrainSimulation::simulationSubTick);
-
-        GamePieceProjectile.updateGamePieceProjectiles(this, this.gamePieceLaunched());
-
-        this.physicsWorld.step(1, SIMULATION_DT.in(Seconds));
-
-        intakeSimulations.forEach(intake -> intake.removeObtainedGamePieces(this));
+        if (isThreeDimensional()) {
+            driveTrainSimulations3D.forEach(AbstractDriveTrainSimulation3D::simulationSubTick);
+            if (odePhysicsWorld != null) {
+                odePhysicsWorld.step(SIMULATION_DT.in(Seconds));
+            }
+            driveTrainSimulations3D.forEach(AbstractDriveTrainSimulation3D::publishVisualizerWireframe);
+        } else {
+            driveTrainSimulations2d.forEach(AbstractDriveTrainSimulation::simulationSubTick);
+            GamePieceProjectile.updateGamePieceProjectiles(this, this.gamePieceLaunched());
+            this.physicsWorld.step(1, SIMULATION_DT.in(Seconds));
+            intakeSimulations.forEach(intake -> intake.removeObtainedGamePieces(this));
+        }
         customSimulations.forEach(sim -> sim.simulationSubTick(subTickNum));
 
         replaceValueInMatchBreakDown(true, "TotalScore", blueScore);
@@ -695,6 +777,7 @@ public abstract class SimulatedArena {
      * positions for the autonomous mode.
      */
     public synchronized void resetFieldForAuto() {
+        ensureDimension(PhysicsDimension.TWO_D, "Game piece placement");
         clearGamePieces();
         matchClock = 0;
         placeGamePiecesOnField();
@@ -723,9 +806,26 @@ public abstract class SimulatedArena {
      * class to store the field map for that specific season's game.
      */
     public abstract static class FieldMap {
+        private static final double DEFAULT_BORDER_THICKNESS = 0.05;
         private final List<Body> obstacles = new ArrayList<>();
+        private final List<ObstacleExtrusion> obstacleExtrusions = new ArrayList<>();
+        private final List<RampExtrusion> rampExtrusions = new ArrayList<>();
+        private final List<DoubleRampExtrusion> doubleRampExtrusions = new ArrayList<>();
+
+        public List<ObstacleExtrusion> getObstacleExtrusions() {
+            return Collections.unmodifiableList(obstacleExtrusions);
+        }
+
+        public List<RampExtrusion> getRampExtrusions() {
+            return Collections.unmodifiableList(rampExtrusions);
+        }
+
+        public List<DoubleRampExtrusion> getDoubleRampExtrusions() {
+            return Collections.unmodifiableList(doubleRampExtrusions);
+        }
 
         protected void addBorderLine(Translation2d startingPoint, Translation2d endingPoint) {
+            obstacleExtrusions.add(ObstacleExtrusion.border(startingPoint, endingPoint, DEFAULT_BORDER_THICKNESS));
             addCustomObstacle(
                     Geometry.createSegment(
                             GeometryConvertor.toDyn4jVector2(startingPoint),
@@ -734,7 +834,22 @@ public abstract class SimulatedArena {
         }
 
         protected void addRectangularObstacle(double width, double height, Pose2d absolutePositionOnField) {
+            obstacleExtrusions.add(ObstacleExtrusion.rectangle(width, height, absolutePositionOnField));
             addCustomObstacle(Geometry.createRectangle(width, height), absolutePositionOnField);
+        }
+
+        protected void addRamp(double length, double width, double height, Pose2d bottomCenterPose) {
+            if (length <= 0 || width <= 0 || height <= 0) {
+                throw new IllegalArgumentException("Ramp dimensions must be positive.");
+            }
+            rampExtrusions.add(new RampExtrusion(length, width, height, bottomCenterPose));
+        }
+
+        protected void addDoubleRamp(double length, double width, double height, Pose2d centerPose) {
+            if (length <= 0 || width <= 0 || height <= 0) {
+                throw new IllegalArgumentException("Ramp dimensions must be positive.");
+            }
+            doubleRampExtrusions.add(new DoubleRampExtrusion(length, width, height, centerPose));
         }
 
         protected void addCustomObstacle(Convex shape, Pose2d absolutePositionOnField) {
@@ -752,6 +867,103 @@ public abstract class SimulatedArena {
             fixture.setFriction(0.6);
             fixture.setRestitution(0.3);
             return obstacle;
+        }
+
+        public static final class ObstacleExtrusion {
+            private final double sizeX;
+            private final double sizeY;
+            private final Pose2d pose;
+
+            private ObstacleExtrusion(double sizeX, double sizeY, Pose2d pose) {
+                this.sizeX = sizeX;
+                this.sizeY = sizeY;
+                this.pose = pose;
+            }
+
+            public static ObstacleExtrusion rectangle(double sizeX, double sizeY, Pose2d pose) {
+                return new ObstacleExtrusion(sizeX, sizeY, pose);
+            }
+
+            public static ObstacleExtrusion border(Translation2d start, Translation2d end, double thickness) {
+                final Translation2d delta = end.minus(start);
+                final double length = delta.getNorm();
+                final Rotation2d heading = delta.getAngle();
+                final Translation2d midpoint =
+                        new Translation2d((start.getX() + end.getX()) / 2.0, (start.getY() + end.getY()) / 2.0);
+                return new ObstacleExtrusion(length, thickness, new Pose2d(midpoint, heading));
+            }
+
+            public double getSizeX() {
+                return sizeX;
+            }
+
+            public double getSizeY() {
+                return sizeY;
+            }
+
+            public Pose2d getPose() {
+                return pose;
+            }
+        }
+
+        public static final class RampExtrusion {
+            private final double length;
+            private final double width;
+            private final double height;
+            private final Pose2d pose;
+
+            private RampExtrusion(double length, double width, double height, Pose2d pose) {
+                this.length = length;
+                this.width = width;
+                this.height = height;
+                this.pose = pose;
+            }
+
+            public double getLength() {
+                return length;
+            }
+
+            public double getWidth() {
+                return width;
+            }
+
+            public double getHeight() {
+                return height;
+            }
+
+            public Pose2d getPose() {
+                return pose;
+            }
+        }
+
+        public static final class DoubleRampExtrusion {
+            private final double length;
+            private final double width;
+            private final double height;
+            private final Pose2d pose;
+
+            private DoubleRampExtrusion(double length, double width, double height, Pose2d pose) {
+                this.length = length;
+                this.width = width;
+                this.height = height;
+                this.pose = pose;
+            }
+
+            public double getLength() {
+                return length;
+            }
+
+            public double getWidth() {
+                return width;
+            }
+
+            public double getHeight() {
+                return height;
+            }
+
+            public Pose2d getPose() {
+                return pose;
+            }
         }
     }
 }
